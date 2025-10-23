@@ -1,79 +1,137 @@
-name: RustDesk For TesLab Server
-
+name: Build RustDesk x64 for TesLab
 
 on:
+  workflow_dispatch:  # Позволяет запускать вручную
   push:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:  # Позволяет запускать вручную
+
+env:
+  FLUTTER_VERSION: "3.24.5"  # Из оригинального файла
+  RUST_VERSION: "1.75"      # Для Windows
+  LLVM_VERSION: "15.0.6"    # Для bindgen
+  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"  # Из оригинального файла
+  VERSION: "1.4.3"          # Версия RustDesk
 
 jobs:
-  build:
-    runs-on: windows-latest
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml  # Необходим для flutter_rust_bridge
 
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  build-for-windows-flutter:
+    name: Windows x64 Flutter
+    needs: [generate-bridge, build-RustDeskTempTopMostWindow]
+    runs-on: windows-2022
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-    - name: Set up Rust
-      uses: rust-lang/rustup@v1
-      with:
-        toolchain: stable
-        target: x86_64-pc-windows-msvc
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Install LLVM/Clang
-      uses: KyleMayes/install-llvm-action@v2
-      with:
-        version: "18.1"
-        env-var: LIBCLANG_PATH
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
 
-    - name: Install Git
-      run: winget install -e --id Git.Git
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
-    - name: Install vcpkg dependencies
-      run: |
-        git clone https://github.com/microsoft/vcpkg
-        .\vcpkg\bootstrap-vcpkg.bat
-        $env:VCPKG_ROOT = "$PWD\vcpkg"
-        $env:PATH += ";$env:VCPKG_ROOT"
-        vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2.12.0
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
 
-    - name: Set up Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        channel: stable
-        flutter-version: 3.24.x  # Укажи актуальную версию Flutter
+      - name: Patch Flutter
+        run: |
+          flutter doctor -v
+          flutter precache --windows
+          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          mv -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+          cd (Split-Path -Path (Get-Command flutter).Path -Parent | Split-Path -Parent)
+          if ("${{ env.FLUTTER_VERSION }}" -eq "3.24.5") {
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+          }
 
-    - name: Install Flutter dependencies
-      run: |
-        cd flutter
-        flutter pub get
-        cd ..
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+          components: "rustfmt"
 
-    - name: Replace custom server config
-      shell: pwsh
-      run: |
-        $constsFile = "flutter/lib/consts.dart"
-        if (Test-Path $constsFile) {
-          $content = Get-Content $constsFile -Raw
-          $content = $content -replace 'const String RENDEZVOUS_SERVER\s*=\s*".*?";', 'const String RENDEZVOUS_SERVER = "${{ secrets.RENDEZVOUS_SERVER }}";'
-          $content = $content -replace 'const String RS_PUB_KEY\s*=\s*".*?";', 'const String RS_PUB_KEY = "${{ secrets.RS_PUB_KEY }}";'
-          $content = $content -replace 'const String API_SERVER\s*=\s*".*?";', 'const String API_SERVER = "${{ secrets.API_SERVER }}";'
-          Set-Content $constsFile $content
-        } else {
-          Write-Error "consts.dart not found"
-          exit 1
-        }
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: windows-2022
 
-    - name: Build Flutter Windows
-      run: |
-        cargo build --release --features flutter --target x86_64-pc-windows-msvc
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: rustdesk-flutter-custom
-        path: target/release/rustdesk.exe
+      - name: Install vcpkg dependencies
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          if (! & $env:VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT/installed") {
+            Get-ChildItem -Path "$env:VCPKG_ROOT/" -Filter "*.log" -Recurse | ForEach-Object {
+              Write-Host "$($_.FullName):"
+              Write-Host "======"
+              Get-Content $_.FullName
+              Write-Host "======"
+              Write-Host ""
+            }
+            exit 1
+          }
+          Get-Content "$env:VCPKG_ROOT/buildtrees/ffmpeg/build-x64-windows-static-rel-out.log" -First 100 -ErrorAction SilentlyContinue
+        shell: pwsh
+
+      - name: Replace custom server config
+        shell: pwsh
+        run: |
+          $constsFile = "flutter/lib/consts.dart"
+          if (Test-Path $constsFile) {
+            $content = Get-Content $constsFile -Raw
+            $content = $content -replace 'const String RENDEZVOUS_SERVER\s*=\s*".*?";', 'const String RENDEZVOUS_SERVER = "${{ secrets.RENDEZVOUS_SERVER }}";'
+            $content = $content -replace 'const String RS_PUB_KEY\s*=\s*".*?";', 'const String RS_PUB_KEY = "${{ secrets.RS_PUB_KEY }}";'
+            $content = $content -replace 'const String API_SERVER\s*=\s*".*?";', 'const String API_SERVER = "${{ secrets.API_SERVER }}";'
+            Set-Content $constsFile $content
+            Write-Host "Updated $constsFile with custom server settings"
+          } else {
+            Write-Error "consts.dart not found"
+            exit 1
+          }
+
+      - name: Build RustDesk
+        run: |
+          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@master
+        with:
+          name: rustdesk-flutter-windows-x64
+          path: rustdesk/rustdesk.exe
