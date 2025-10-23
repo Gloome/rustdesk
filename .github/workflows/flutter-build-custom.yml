@@ -95,7 +95,7 @@ jobs:
       - name: Install vcpkg dependencies
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed"
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows-static --x-install-root="$env:VCPKG_ROOT\installed" libvpx opus aom
           if ($LASTEXITCODE -ne 0) {
             Get-ChildItem -Path "$env:VCPKG_ROOT" -Filter "*.log" -Recurse | ForEach-Object {
               Write-Host "$($_.FullName):"
@@ -112,22 +112,35 @@ jobs:
         shell: pwsh
         run: |
           $constsFile = "flutter/lib/consts.dart"
-          if (Test-Path $constsFile) {
-            $content = Get-Content $constsFile -Raw
-            $content = $content -replace 'const String RENDEZVOUS_SERVER\s*=\s*".*?";', 'const String RENDEZVOUS_SERVER = "${{ secrets.RENDEZVOUS_SERVER }}";'
-            $content = $content -replace 'const String RS_PUB_KEY\s*=\s*".*?";', 'const String RS_PUB_KEY = "${{ secrets.RS_PUB_KEY }}";'
-            $content = $content -replace 'const String API_SERVER\s*=\s*".*?";', 'const String API_SERVER = "${{ secrets.API_SERVER }}";'
-            Set-Content $constsFile $content
-            Write-Host "Updated $constsFile with custom server settings"
-          } else {
-            Write-Error "consts.dart not found"
-            exit 1
+          if (-not (Test-Path $constsFile)) {
+            Write-Host "Creating $constsFile because it does not exist"
+            Set-Content -Path $constsFile -Value @"
+              const String RENDEZVOUS_SERVER = "";
+              const String RS_PUB_KEY = "";
+              const String API_SERVER = "";
+            "@
           }
+          $content = Get-Content $constsFile -Raw
+          $content = $content -replace 'const String RENDEZVOUS_SERVER\s*=\s*".*?";', 'const String RENDEZVOUS_SERVER = "${{ secrets.RENDEZVOUS_SERVER }}";'
+          $content = $content -replace 'const String RS_PUB_KEY\s*=\s*".*?";', 'const String RS_PUB_KEY = "${{ secrets.RS_PUB_KEY }}";'
+          $content = $content -replace 'const String API_SERVER\s*=\s*".*?";', 'const String API_SERVER = "${{ secrets.API_SERVER }}";'
+          Set-Content $constsFile $content
+          Write-Host "Updated $constsFile with custom server settings"
 
       - name: Build RustDesk
         run: |
-          python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
+          $buildOutput = & python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Build failed with output:"
+            Write-Host $buildOutput
+            exit 1
+          }
           mv ./flutter/build/windows/x64/runner/Release ./rustdesk
+          if (-not (Test-Path .\rustdesk\rustdesk.exe)) {
+            Write-Error "rustdesk.exe not found after build"
+            exit 1
+          }
+          Write-Host "Build succeeded, rustdesk.exe is at .\rustdesk\rustdesk.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@master
