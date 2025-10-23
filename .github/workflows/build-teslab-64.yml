@@ -1,0 +1,79 @@
+name: RustDesk For TesLab Server x64
+
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # Позволяет запускать вручную
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Rust
+      uses: rust-lang/rustup@v1
+      with:
+        toolchain: stable
+        target: x86_64-pc-windows-msvc
+
+    - name: Install LLVM/Clang
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: "18.1"
+        env-var: LIBCLANG_PATH
+
+    - name: Install Git
+      run: winget install -e --id Git.Git
+
+    - name: Install vcpkg dependencies
+      run: |
+        git clone https://github.com/microsoft/vcpkg
+        .\vcpkg\bootstrap-vcpkg.bat
+        $env:VCPKG_ROOT = "$PWD\vcpkg"
+        $env:PATH += ";$env:VCPKG_ROOT"
+        vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        channel: stable
+        flutter-version: 3.24.x  # Укажи актуальную версию Flutter
+
+    - name: Install Flutter dependencies
+      run: |
+        cd flutter
+        flutter pub get
+        cd ..
+
+    - name: Replace custom server config
+      shell: pwsh
+      run: |
+        $constsFile = "flutter/lib/consts.dart"
+        if (Test-Path $constsFile) {
+          $content = Get-Content $constsFile -Raw
+          $content = $content -replace 'const String RENDEZVOUS_SERVER\s*=\s*".*?";', 'const String RENDEZVOUS_SERVER = "${{ secrets.RENDEZVOUS_SERVER }}";'
+          $content = $content -replace 'const String RS_PUB_KEY\s*=\s*".*?";', 'const String RS_PUB_KEY = "${{ secrets.RS_PUB_KEY }}";'
+          $content = $content -replace 'const String API_SERVER\s*=\s*".*?";', 'const String API_SERVER = "${{ secrets.API_SERVER }}";'
+          Set-Content $constsFile $content
+        } else {
+          Write-Error "consts.dart not found"
+          exit 1
+        }
+
+    - name: Build Flutter Windows
+      run: |
+        cargo build --release --features flutter --target x86_64-pc-windows-msvc
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: rustdesk-flutter-custom
+        path: target/release/rustdesk.exe
